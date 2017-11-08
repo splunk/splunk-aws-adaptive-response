@@ -1,0 +1,914 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::Serverless-2016-10-31",
+  "Description": "AWS CloudFormation template for the AWS instance snapshot, tagging, shutdown Splunk AR action",
+  "Parameters": {
+    "SenderEmail": {
+      "Description": "The email address that will be used to contact the receiver to approve/deny an action on a flagged AWS instance. (format - 123@xyz.com)",
+      "Type": "String"
+    },
+    "ReceiverEmail": {
+      "Description": "The email address that will be contacted to approve/deny an action on a flagged AWS instance. (format - 123@xyz.com)",
+      "Type": "String"
+    },
+    "SplunkHttpEventCollectorToken": {
+      "Description": "HEC token from the Splunk server which will receive updates on the status of the action as it completes. (format - 12345678-qwer-asdf-zxcv-123456789qwe)",
+      "Type": "String"
+    },
+    "SplunkHttpEventCollectorURL": {
+      "Description": "The HEC endpoint server and port (default 8088) of the the Splunk environment which will receive updates on the status of the action as it completes. (format - server:port)",
+      "Type": "String"
+    },
+    "SecurityGroupAdd": {
+      "Description": "The action can add the instance to a provided security group (For example: ssh only) when triggered. This security group update needs to be rolled back manually",
+      "AllowedValues": ["Yes", "No"],
+      "Default": "No",
+      "Type": "String"
+    },
+    "SecurityGroupName": {
+      "Description": "The name of the security group that the instance will be added to. This security group must already exist in your ec2 environment.",
+      "Type": "String",
+      "Default": "None"
+    }
+  },
+  "Resources": {
+    "SnapAPI": {
+      "Type": "AWS::Serverless::Api",
+      "Properties": {
+        "Name": "Snap API",
+        "StageName": "SnapLATEST",
+        "DefinitionUri": "api_swagger_template.json",
+        "Variables": {
+          "StateRequestRole": {
+            "Ref": "StateRequestRole"
+          }
+        }
+      }
+    },
+    "ErrorHandlerLogGroup": {
+      "Type" : "AWS::Logs::LogGroup",
+      "Properties" : {
+        "LogGroupName" : "/aws/lambda/ErrorHandler",
+        "RetentionInDays" : 7
+      }
+    },
+    "InstCheckLogGroup": {
+      "Type" : "AWS::Logs::LogGroup",
+      "Properties" : {
+        "LogGroupName" : "/aws/lambda/InstCheck",
+        "RetentionInDays" : 7
+      }
+    },
+    "SnapActLogGroup": {
+      "Type" : "AWS::Logs::LogGroup",
+      "Properties" : {
+        "LogGroupName" : "/aws/lambda/SnapAct",
+        "RetentionInDays" : 7
+      }
+    },
+    "SnapCheckLogGroup": {
+      "Type" : "AWS::Logs::LogGroup",
+      "Properties" : {
+        "LogGroupName" : "/aws/lambda/SnapCheck",
+        "RetentionInDays" : 7
+      }
+    },
+    "SnapEmailLogGroup": {
+      "Type" : "AWS::Logs::LogGroup",
+      "Properties" : {
+        "LogGroupName" : "/aws/lambda/SnapEmail",
+        "RetentionInDays" : 7
+      }
+    },
+    "LogProcessorSnapActSubscriptionFilter": {
+      "Type": "AWS::Logs::SubscriptionFilter",
+      "DependsOn": ["LogProcessorSnapActLambdaPermission"],
+      "Properties": {
+        "DestinationArn": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "FilterPattern":  "",
+        "LogGroupName": "/aws/lambda/SnapAct",
+      }
+    },
+    "LogProcessorSnapActLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "Principal": { "Fn::Join": [
+            ".",
+            [ "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::URLSuffix"}]
+          ]
+        },
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": { "Fn::Join": [
+            ":",
+            [ "arn", {"Ref": "AWS::Partition"}, "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::AccountId"}, "log-group", "/aws/lambda/SnapAct", "*" ]
+          ]
+        }
+      }
+    },
+    "LogProcessorErrorHandlerSubscriptionFilter": {
+      "Type": "AWS::Logs::SubscriptionFilter",
+      "DependsOn": ["LogProcessorErrorHandlerLambdaPermission"],
+      "Properties": {
+        "DestinationArn": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "FilterPattern":  "",
+        "LogGroupName": "/aws/lambda/ErrorHandler",
+      }
+    },
+    "LogProcessorErrorHandlerLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "Principal": { "Fn::Join": [
+            ".",
+            [ "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::URLSuffix"}]
+          ]
+        },
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": { "Fn::Join": [
+            ":",
+            [ "arn", {"Ref": "AWS::Partition"}, "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::AccountId"}, "log-group", "/aws/lambda/ErrorHandler", "*" ]
+          ]
+        }
+      }
+    },
+    "LogProcessorInstCheckSubscriptionFilter": {
+      "Type": "AWS::Logs::SubscriptionFilter",
+      "DependsOn": ["LogProcessorInstCheckLambdaPermission"],
+      "Properties": {
+        "DestinationArn": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "FilterPattern":  "",
+        "LogGroupName": "/aws/lambda/InstCheck",
+      }
+    },
+    "LogProcessorInstCheckLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "Principal": { "Fn::Join": [
+            ".",
+            [ "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::URLSuffix"}]
+          ]
+        },
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": { "Fn::Join": [
+            ":",
+            [ "arn", {"Ref": "AWS::Partition"}, "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::AccountId"}, "log-group", "/aws/lambda/InstCheck", "*" ]
+          ]
+        }
+      }
+    },
+    "LogProcessorSnapCheckSubscriptionFilter": {
+      "Type": "AWS::Logs::SubscriptionFilter",
+      "DependsOn": ["LogProcessorSnapCheckLambdaPermission"],
+      "Properties": {
+        "DestinationArn": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "FilterPattern":  "",
+        "LogGroupName": "/aws/lambda/SnapCheck",
+      }
+    },
+    "LogProcessorSnapCheckLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "Principal": { "Fn::Join": [
+            ".",
+            [ "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::URLSuffix"}]
+          ]
+        },
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": { "Fn::Join": [
+            ":",
+            [ "arn", {"Ref": "AWS::Partition"}, "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::AccountId"}, "log-group", "/aws/lambda/SnapCheck", "*" ]
+          ]
+        }
+      }
+    },
+    "LogProcessorSnapEmailSubscriptionFilter": {
+      "Type": "AWS::Logs::SubscriptionFilter",
+      "DependsOn": ["LogProcessorSnapEmailLambdaPermission"],
+      "Properties": {
+        "DestinationArn": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "FilterPattern":  "",
+        "LogGroupName": "/aws/lambda/SnapEmail",
+      }
+    },
+    "LogProcessorSnapEmailLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Fn::GetAtt": ["BackingLambdaFunctionLogProcessor", "Arn"]},
+        "Principal": { "Fn::Join": [
+            ".",
+            [ "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::URLSuffix"}]
+          ]
+        },
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": { "Fn::Join": [
+            ":",
+            [ "arn", {"Ref": "AWS::Partition"}, "logs", {"Ref": "AWS::Region"}, {"Ref": "AWS::AccountId"}, "log-group", "/aws/lambda/SnapEmail", "*" ]
+          ]
+        }
+      }
+    },
+    "BackingLambdaFunctionLogProcessor": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "CodeUri": "./aws_adaptive_response_lambdas/logger",
+        "Description": "Stream events from AWS CloudWatch Logs to Splunk HTTP event collector",
+        "FunctionName": "LogProcessor",
+        "Handler": "index.handler",
+        "MemorySize": 512,
+        "Role": { "Fn::GetAtt": ["BackingLambdaExecutionRoleLogProcessor", "Arn"] },
+        "Runtime": "nodejs6.10",
+        "Timeout": 30,
+        "Environment": {
+          "Variables": {
+            "SPLUNK_HEC_URL": { "Ref": "SplunkHttpEventCollectorURL" },
+            "SPLUNK_HEC_TOKEN": { "Ref": "SplunkHttpEventCollectorToken"}
+          }
+        }
+      }
+    },
+    "BackingLambdaExecutionRoleLogProcessor": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+              "Service": [ "lambda.amazonaws.com" ]
+            },
+              "Action": [ "sts:AssumeRole" ]
+            }
+          ]
+        },
+        "ManagedPolicyArns": ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"],
+        "Path": "/"
+      }
+    },
+    "BackingLambdaFunctionSnapAct": {
+         "Type": "AWS::Serverless::Function",
+         "Properties": {
+            "Description": "Adds a tag, takes a snapshot, and optionally a security group to a flagged ec2 instance",
+            "CodeUri": "aws_adaptive_response_lambdas/snap_act",
+            "FunctionName": "SnapAct",
+            "Handler": "snap_act.lambda_handler",
+            "Role": { "Fn::GetAtt": [ "BackingLambdaExecutionRoleSnapAct", "Arn" ] },
+            "Runtime": "python2.7",
+            "Timeout": 90,
+            "Environment": {
+              "Variables": {
+                "region": { "Ref": "AWS::Region" },
+                "security_group_add": {"Ref": "SecurityGroupAdd"},
+                "security_group_name": {"Ref": "SecurityGroupName"}
+              }
+            }
+         }
+      },
+      "BackingLambdaExecutionRoleSnapAct": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+                  {
+                     "Effect": "Allow",
+                     "Principal": {
+                        "Service": [ "lambda.amazonaws.com" ]
+                     },
+                     "Action": [ "sts:AssumeRole" ]
+                  }
+               ]
+            },
+            "Policies": [
+               {
+                  "PolicyName": "LambdaSnapActPolicy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                      {
+                        "Effect": "Allow",
+                        "Action": [
+                          "logs:*"
+                        ],
+                        "Resource": "arn:aws:logs:*:*:*"
+                      },
+                      {
+                        "Effect": "Allow",
+                        "Action": "ec2:Describe*",
+                        "Resource": "*"
+                      },
+                      {
+                        "Effect": "Allow",
+                        "Action": [
+                          "ec2:CreateSnapshot",
+                          "ec2:CreateTags",
+                          "ec2:CreateSecurityGroup",
+                          "ec2:ModifySnapshotAttribute",
+                          "ec2:ResetSnapshotAttribute",
+                          "ec2:ModifyInstanceAttribute"
+                        ],
+                        "Resource": [
+                          "*"
+                        ]
+                      }
+                    ]
+                  }
+               }
+            ]
+         }
+      },
+    "BackingLambdaFunctionSnapCheck": {
+         "Type": "AWS::Serverless::Function",
+         "Properties": {
+            "CodeUri": "aws_adaptive_response_lambdas/snap_check",
+            "Description": "Checks if an ec2 instance snapshot has completed",
+            "FunctionName": "SnapCheck",
+            "Handler": "snap_check.lambda_handler",
+            "Role": { "Fn::GetAtt": [ "BackingLambdaExecutionRoleSnapCheck", "Arn" ] },
+            "Runtime": "python2.7",
+            "Timeout": 90,
+            "Environment": {
+              "Variables": {
+                "region": { "Ref": "AWS::Region" }
+              }
+            }
+         }
+      },
+      "BackingLambdaExecutionRoleSnapCheck": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+                  {
+                     "Effect": "Allow",
+                     "Principal": {
+                        "Service": [ "lambda.amazonaws.com" ]
+                     },
+                     "Action": [ "sts:AssumeRole" ]
+                  }
+               ]
+            },
+            "Policies": [
+               {
+                  "PolicyName": "LambdaSnapCheckPolicy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ],
+                            "Resource": "arn:aws:logs:*:*:*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:Terminate*",
+                                "ec2:Stop*",
+                                "ec2:DescribeSnapshots"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                  }
+               }
+            ]
+         }
+      },
+    "BackingLambdaFunctionInstCheck": {
+         "Type": "AWS::Serverless::Function",
+         "Properties": {
+            "CodeUri": "aws_adaptive_response_lambdas/inst_check",
+            "Description": "Checks if the requested action has completed on an ec2 instance",
+            "FunctionName": "InstCheck",
+            "Handler": "inst_check.lambda_handler",
+            "Role": { "Fn::GetAtt": [ "BackingLambdaExecutionRoleInstCheck", "Arn" ] },
+            "Runtime": "python2.7",
+            "Timeout": 90,
+            "Environment": {
+              "Variables": {
+                "region": { "Ref": "AWS::Region" }
+              }
+            }
+         }
+      },
+      "BackingLambdaExecutionRoleInstCheck": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+                  {
+                     "Effect": "Allow",
+                     "Principal": {
+                        "Service": [ "lambda.amazonaws.com" ]
+                     },
+                     "Action": [ "sts:AssumeRole" ]
+                  }
+               ]
+            },
+            "Policies": [
+               {
+                  "PolicyName": "LambdaInstCheckPolicy",
+                  "PolicyDocument": {
+                     "Version": "2012-10-17",
+                     "Statement": [
+                      {
+                        "Effect": "Allow",
+                        "Action": [
+                            "logs:CreateLogGroup",
+                            "logs:CreateLogStream",
+                            "logs:PutLogEvents"
+                        ],
+                        "Resource": "arn:aws:logs:*:*:*"
+                      },
+                      {
+                        "Effect": "Allow",
+                        "Action": "ec2:DescribeInstances",
+                        "Resource": "*"
+                      }
+                    ]
+                  }
+               }
+            ]
+         }
+      },
+    "BackingLambdaFunctionSnapEmail": {
+         "Type": "AWS::Serverless::Function",
+         "Properties": {
+            "CodeUri": "aws_adaptive_response_lambdas/snap_email",
+            "Description": "Sends an email requesting approval to perform an action on a flagged ec2 instance",
+            "FunctionName": "SnapEmail",
+            "Handler": "snap_email.lambda_handler",
+            "Role": { "Fn::GetAtt": [ "BackingLambdaExecutionRoleSnapEmail", "Arn" ] },
+            "Runtime": "python2.7",
+            "Timeout": 90,
+            "Environment": {
+              "Variables" : { "sender": { "Ref" : "SenderEmail" }, "recipient": { "Ref" : "ReceiverEmail" }, "activity_arn": { "Ref": "SnapStateMachineActivity" }, "gateway_url": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "https://",
+                      {
+                        "Ref": "SnapAPI"
+                      },
+                      ".execute-api.",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      ".amazonaws.com"
+                    ]
+                  ]
+                }, 
+                "region": { "Ref": "AWS::Region" },
+                "stage_name": "SnapLATEST"
+              }
+            }
+         }
+      },
+      "BackingLambdaExecutionRoleSnapEmail": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+                  {
+                     "Effect": "Allow",
+                     "Principal": {
+                        "Service": [ "lambda.amazonaws.com" ]
+                     },
+                     "Action": [ "sts:AssumeRole" ]
+                  }
+               ]
+            },
+            "Policies": [
+               {
+                  "PolicyName": "LambdaSnapEmailPolicy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ],
+                            "Resource": "arn:aws:logs:*:*:*"
+                        },
+                        {
+                          "Effect": "Allow",
+                          "Action": "ec2:Describe*",
+                          "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "cloudwatch:PutMetricData"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": "states:GetActivityTask",
+                            "Resource": "arn:aws:states:*:*:activity:ApproveDenyAction"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ses:SendEmail"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                  }
+               }
+            ]
+         }
+      },
+    "BackingLambdaFunctionErrorHandler": {
+         "Type": "AWS::Serverless::Function",
+         "Properties": {
+            "CodeUri": "aws_adaptive_response_lambdas/error_handler",
+            "Description": "Generic error handler for all parts of the Step Function",
+            "FunctionName": "ErrorHandler",
+            "Handler": "error_handler.lambda_handler",
+            "Role": { "Fn::GetAtt": [ "BackingLambdaExecutionRoleErrorHandler", "Arn" ] },
+            "Runtime": "python2.7",
+            "Timeout": 90,
+            "Environment": {
+              "Variables": {
+                "region": { "Ref": "AWS::Region" }
+              }
+            }
+         }
+      },
+      "BackingLambdaExecutionRoleErrorHandler": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+                  {
+                     "Effect": "Allow",
+                     "Principal": {
+                        "Service": [ "lambda.amazonaws.com" ]
+                     },
+                     "Action": [ "sts:AssumeRole" ]
+                  }
+               ]
+            },
+            "Policies": [
+               {
+                  "PolicyName": "LambdaSnapErrorHandlerPolicy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                      {
+                        "Effect": "Allow",
+                        "Action": [
+                          "logs:CreateLogGroup",
+                          "logs:CreateLogStream",
+                          "logs:PutLogEvents"
+                        ],
+                        "Resource": "arn:aws:logs:*:*:*"
+                      },
+                     {
+                           "Effect": "Allow",
+                        "Action": [
+                          "ec2:DeleteTags",
+                          "ec2:DeleteSnapshot",
+                          "ec2:DescribeSnapshots"
+                        ],
+                        "Resource": [
+                          "*"
+                        ]
+                      }
+                    ]
+                  }
+               }
+            ]
+         }
+      },
+      "SnapApiKey": {
+        "Type" : "AWS::ApiGateway::ApiKey",
+        "DependsOn" : ["SnapAPISnapLATESTStage"],
+        "Properties" : {
+          "Description" : "Key for snap endpoint",
+          "Enabled" : true,
+          "Name" : "snap_key",
+          "StageKeys" : [{
+            "RestApiId": { "Ref": "SnapAPI" },
+            "StageName": "SnapLATEST"
+          }]
+        }
+      },
+      "usagePlan" : {
+        "Type" : "AWS::ApiGateway::UsagePlan",
+        "DependsOn" : ["SnapAPISnapLATESTStage"],
+        "Properties" : {
+          "ApiStages" : [ {"ApiId" : { "Ref" : "SnapAPI" }, "Stage" : "SnapLATEST"} ],
+          "Description" : "Single key usage plan",
+          "UsagePlanName" : "Snap_Plan"
+        }
+      },
+      "usagePlanKey" : {
+        "Type": "AWS::ApiGateway::UsagePlanKey",
+        "DependsOn" : ["SnapAPISnapLATESTStage"],
+        "Properties": {
+          "KeyId" : {"Ref" : "SnapApiKey"},
+          "KeyType" : "API_KEY",
+          "UsagePlanId" : {"Ref" : "usagePlan"}
+        }
+      },
+    "StateRole": {
+      "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": [
+                    {"Fn::Join": ["", ["states.", {"Ref": "AWS::Region"}, ".amazonaws.com"]]}
+                  ]
+                },
+                "Action": [
+                  "sts:AssumeRole"
+                ]
+              }
+            ]
+          },
+          "Policies": [
+               {
+                  "PolicyName": "LambdaStepPolicy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Action": [
+                                    "lambda:InvokeFunction"
+                                ],
+                                "Resource": "*"
+                            }
+                        ]
+                  }
+               }
+            ]
+        }
+      },
+      "StateRequestRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [ {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": [
+                      "apigateway.amazonaws.com"
+                    ]
+                  },
+                  "Action": [
+                    "sts:AssumeRole"
+                  ]
+                }
+              ]
+            },
+            "Policies": [{
+              "PolicyName": "ApproveDenyPolicy",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": "states:*",
+                    "Resource": "*"
+                  }
+                ]
+              }
+            }]
+        }
+      },
+      "SnapStateMachineActivity": {
+        "Type": "AWS::StepFunctions::Activity",
+        "Properties": {
+          "Name": "ApproveDenyAction"
+        }
+      },
+      "SnapStateMachine": {
+      "Type": "AWS::StepFunctions::StateMachine",
+      "DependsOn": [
+        "StateRole"
+      ],
+      "Properties": {
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "StateRole",
+            "Arn"
+          ]
+        },
+        "DefinitionString": {
+          "Fn::Join": [
+            "\n",
+            [
+              "{",
+              "  \"StartAt\": \"SnapTagAdd\", ",
+              "  \"States\": {",
+              "    \"SnapTagAdd\": {",
+              "    \"Type\": \"Task\", ",
+              { "Fn::Join": ["", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionSnapAct", "Arn"]}, "\", "]] },
+              "    \"Next\": \"SnapTagAddStatus\" ",
+              "    },",
+              "    \"Parallel\": { ",
+              "    \"Type\": \"Parallel\", ",
+              "    \"Next\": \"CheckStatusSnap\", ",
+              "    \"Branches\": [ ",
+              "    {",
+              "       \"StartAt\": \"SendEmail\", ",
+              "       \"States\": { ",
+              "       \"SendEmail\": { ",
+              "            \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["            \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionSnapEmail", "Arn"]}, "\", "]] },
+              "            \"End\": true ",
+              "         }",
+              "      }",
+              "     },",
+              "     {",
+              "      \"StartAt\": \"ActivityWait\", ",
+              "      \"States\": { ",
+              "         \"ActivityWait\": { ",
+              "            \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Ref": "SnapStateMachineActivity"}, "\", "]] },
+              "            \"TimeoutSeconds\": 86400, ",
+              "            \"End\": true ",
+              "         } ",
+              "       } ",
+              "     } ",
+              "   ], ",
+              "   \"Catch\": [ ",
+              "     { ",
+              "       \"ErrorEquals\": [\"States.Timeout\"], ",
+              "       \"Next\": \"TimeoutErrorHandler\" ",
+              "     }, { ",
+              "       \"ErrorEquals\": [\"States.ALL\"], ",
+              "       \"Next\": \"GeneralErrorHandler\" ",
+              "     } ] ",
+              " }, ",
+              " \"ActionRejectedHandler\": { ",
+              "   \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionErrorHandler", "Arn"]}, "\", "]] },
+              "   \"Next\":\"Error\" ",
+              " }, ",
+              " \"TimeoutErrorHandler\": { ",
+              "   \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionErrorHandler", "Arn"]}, "\", "]] },
+              "   \"Next\":\"Error\" ",
+              " }, ",
+              " \"GeneralErrorHandler\": { ",
+              "   \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionErrorHandler", "Arn"]}, "\", "]] },
+              "   \"Next\":\"Error\" ",
+              " }, ",
+              " \"SnapTagAddStatus\": { ",
+              "     \"Type\": \"Choice\", ",
+              "     \"Choices\": [ ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 1, ",
+              "         \"Next\": \"Parallel\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 2, ",
+              "         \"Next\": \"GeneralErrorHandler\" ",
+              "       } ",
+              "     ], ",
+              "     \"Default\": \"GeneralErrorHandler\" ",
+              " }, ",
+              " \"PollerSnapStatus\": { ",
+              "     \"Type\": \"Choice\", ",
+              "     \"Choices\": [ ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 0, ",
+              "         \"Next\": \"WaitThreeSecondsSnap\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 1, ",
+              "         \"Next\": \"PollerStateStatus\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 2, ",
+              "         \"Next\": \"ActionRejectedHandler\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 3, ",
+              "         \"Next\": \"GeneralErrorHandler\" ",
+              "       } ",
+              "     ], ",
+              "     \"Default\": \"GeneralErrorHandler\" ",
+              " }, ",
+              " \"PollerStateStatus\": { ",
+              "     \"Type\": \"Choice\", ",
+              "     \"Choices\": [ ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 1, ",
+              "         \"Next\": \"CheckStatusInst\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 2, ",
+              "         \"Next\": \"Done\" ",
+              "       }, ",
+              "       { ",
+              "         \"Variable\": \"$.ret_var\", ",
+              "         \"NumericEquals\": 3, ",
+              "         \"Next\": \"GeneralErrorHandler\" ",
+              "       } ",
+              "     ], ",
+              "     \"Default\": \"GeneralErrorHandler\" ",
+              " }, ",
+              " \"WaitThreeSecondsSnap\": { ",
+              "   \"Type\": \"Wait\", ",
+              "   \"Seconds\": 3, ",
+              "   \"Next\": \"CheckStatusSnap\" ",
+              " }, ",
+              " \"WaitThreeSecondsInst\": { ",
+              "   \"Type\": \"Wait\", ",
+              "   \"Seconds\": 3, ",
+              "   \"Next\": \"PollerStateStatus\" ",
+              " }, ",
+              " \"CheckStatusInst\": { ",
+              "   \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionInstCheck", "Arn"]}, "\", "]] },
+              "   \"Next\":\"WaitThreeSecondsInst\" ",
+              " }, ",
+              " \"CheckStatusSnap\": { ",
+              "   \"Type\": \"Task\", ",
+              { "Fn::Join": [ "", ["    \"Resource\": \"", {"Fn::GetAtt": ["BackingLambdaFunctionSnapCheck", "Arn"]}, "\", "]] },
+              "   \"Next\":\"PollerSnapStatus\" ",
+              " }, ",
+              " \"Error\": { ",
+              "   \"Type\": \"Fail\" ",
+              " }, ",
+              " \"Done\": { ",
+              "   \"Type\": \"Pass\", ",
+              "   \"End\": true ",
+              "  }",
+              " }",
+              "}"
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "RootUrl": {
+      "Description": "Root URL of the API gateway",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Ref": "SnapAPI"
+            },
+            ".execute-api.",
+            {
+              "Ref": "AWS::Region"
+            },
+            ".amazonaws.com"
+          ]
+        ]
+      }
+    },
+    "StepFunctionARN": {
+      "Description": "The ARN of the the Step Function created by the template. This ARN is a required setup parameter for the Splunk AR action",
+      "Value": {"Ref": "SnapStateMachine"}
+    },
+    "ApiID": {
+      "Description": "The ID associated with the API Key of the launched stage. Use the key name (snap_key) with this ID to find the correct key in the AWS API Gateway console",
+      "Value": { "Ref" : "SnapApiKey"}
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "version": "2017-09-19T18:45:50Z",
+    "title": "Snap API"
+  },
+  "basePath": "/SnapLATEST",
+  "schemes": [
+    "https"
+  ],
+  "paths": {
+    "/approve": {
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "name": "taskToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "email_status",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "credentials": "arn:aws:iam::<<AccountId>>:role/${stageVariables.StateRequestRole}",
+          "responses": {
+            "default": {
+              "statusCode": "200"
+            }
+          },
+          "requestTemplates": {
+            "application/json": "#set($inputRoot = $input.path('$'))\n{\n   \"output\": \"\\\"$input.params('email_status')\\\"\",\n   \"taskToken\": \"$input.params('taskToken')\"\n}"
+          },
+          "uri": "arn:aws:apigateway:<<Region>>:states:action/SendTaskSuccess",
+          "passthroughBehavior": "when_no_match",
+          "httpMethod": "POST",
+          "type": "aws"
+        }
+      }
+    },
+    "/step_function": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
+        "x-amazon-apigateway-integration": {
+          "credentials": "arn:aws:iam::<<AccountId>>:role/${stageVariables.StateRequestRole}",
+          "responses": {
+            "default": {
+              "statusCode": "200"
+            }
+          },
+          "uri": "arn:aws:apigateway:<<Region>>:states:action/StartExecution",
+          "passthroughBehavior": "when_no_match",
+          "httpMethod": "POST",
+          "type": "aws"
+        }
+      }
+    }
+  },
+  "securityDefinitions": {
+    "api_key": {
+      "type": "apiKey",
+      "name": "x-api-key",
+      "in": "header"
+    }
+  }
+}
