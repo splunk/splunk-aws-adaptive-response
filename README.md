@@ -62,6 +62,8 @@ Deploy the updated template (`template.output.json`) using the AWS CloudFormatio
 #### CLI Deployment
 It is possible to run from the cli by first using a template preprocessor such as [cfn-include](https://www.npmjs.com/package/cfn-include). The preprocessor will minify this JSON template file to a size below the 50kb limit. The below aws cli command will complete the remainder of the deployment. You will need to replace the parameters (format: `<parameter>`) with values from your environment before runnning either command.
 
+You can also upload the template to an s3 bucket first and deploy using that bucket link.
+
 If the instance will not be added to a new security group as a part of the action (removes all others): 
 ```
 aws cloudformation deploy --template $(pwd)/template.output.yaml --parameter-overrides \
